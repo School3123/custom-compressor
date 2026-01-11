@@ -12,6 +12,8 @@ GitHub Codespaces（クラウド環境）上で動作し、ブラウザを通じ
 
 ## 3. セットアップと起動方法（GitHub Codespaces）
 
+PATH（実行パス）の問題を回避するため、以下の手順での起動を推奨します。
+
 1.  **環境構築**
     Codespacesのターミナルで以下のコマンドを実行し、必要なライブラリをインストールします。
     ```bash
@@ -19,9 +21,9 @@ GitHub Codespaces（クラウド環境）上で動作し、ブラウザを通じ
     ```
 
 2.  **アプリの起動**
-    以下のコマンドを実行します。
+    以下のコマンドを実行します（`python -m` を付けることで確実に起動できます）。
     ```bash
-    streamlit run app.py
+    python -m streamlit run app.py
     ```
 
 3.  **ブラウザで開く**

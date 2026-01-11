@@ -1,127 +1,134 @@
 import streamlit as st
-import zlib
+import lzma
+import struct
 import io
+import os
 
-# --- 独自の圧縮・解凍ロジック ---
+# --- 設定 ---
+# 独自のファイル識別子 (Magic Number)
+MAGIC_NUMBER = b'MYCP'
+# バージョン (将来の拡張用)
+VERSION = 1
 
-# 独自のファイルヘッダー（これが一致しないと解凍しない）
-FILE_HEADER = b'MY_UNIQUE_ARCHIVE_v1'
-
-def custom_compress(file_bytes: bytes, password_int: int) -> bytes:
+def compress_data(file_bytes, original_filename):
     """
-    1. zlibで圧縮
-    2. パスワード(0-255)を使ってXOR演算で撹拌（独自形式化）
-    3. ヘッダーを付与
+    データをLZMA(最高圧縮)で圧縮し、独自ヘッダーを付与する
+    フォーマット: [MAGIC(4)] [VERSION(1)] [FilenameLen(2)] [Filename(N)] [CompressedData]
     """
-    # 1. 圧縮
-    compressed_data = zlib.compress(file_bytes, level=9)
-    
-    # 2. XOR撹拌 (簡易暗号化)
-    # bytesをbytearrayに変換して操作
-    scrambled = bytearray(compressed_data)
-    for i in range(len(scrambled)):
-        scrambled[i] ^= password_int
-    
-    # 3. ヘッダー + データ
-    return FILE_HEADER + scrambled
-
-def custom_decompress(file_bytes: bytes, password_int: int) -> bytes:
-    """
-    1. ヘッダー確認
-    2. XOR演算を逆に行う
-    3. zlibで解凍
-    """
-    header_len = len(FILE_HEADER)
-    
-    # ヘッダーチェック
-    if not file_bytes.startswith(FILE_HEADER):
-        raise ValueError("このアプリで作成されたファイルではありません（ヘッダー不一致）。")
-    
-    # ヘッダーを除去
-    scrambled_data = file_bytes[header_len:]
-    
-    # XOR逆変換
-    unscrambled = bytearray(scrambled_data)
-    for i in range(len(unscrambled)):
-        unscrambled[i] ^= password_int
-        
-    # 解凍
     try:
-        decompressed_data = zlib.decompress(unscrambled)
-        return decompressed_data
-    except zlib.error:
-        raise ValueError("解凍に失敗しました。パスワード(Key)が間違っているか、データが破損しています。")
+        # ファイル名をバイト列に変換
+        filename_bytes = original_filename.encode('utf-8')
+        filename_len = len(filename_bytes)
 
-# --- Streamlit UI ---
+        # ヘッダー作成
+        # I: Magic(4bytes, intとして処理も可だがここは生バイト)
+        # B: Version(1byte)
+        # H: Filename Length(2bytes, unsigned short. max 65535)
+        header = MAGIC_NUMBER + struct.pack('>B H', VERSION, filename_len) + filename_bytes
 
-st.set_page_config(page_title="独自形式コンプレッサー", layout="centered")
+        # 最高圧縮率(preset=9)で圧縮
+        # extreme=Trueでさらに圧縮率を稼ぐ（時間はかかる）
+        compressed_body = lzma.compress(file_bytes, preset=9 | lzma.PRESET_EXTREME)
 
-st.title("🗜️ 独自形式ファイル変換ツール")
+        return header + compressed_body
+    except Exception as e:
+        st.error(f"圧縮エラー: {e}")
+        return None
+
+def decompress_data(file_bytes):
+    """
+    独自形式のファイルを解析し、元のファイル名とデータを復元する
+    """
+    try:
+        cursor = 0
+        
+        # 1. マジックナンバー確認
+        magic = file_bytes[cursor:cursor+4]
+        cursor += 4
+        if magic != MAGIC_NUMBER:
+            st.error("エラー: このアプリで作成されたファイルではありません (Invalid Magic Number)。")
+            return None, None
+
+        # 2. バージョンとファイル名長を取得
+        # >B H: Big-endian, unsigned char, unsigned short
+        version, filename_len = struct.unpack('>B H', file_bytes[cursor:cursor+3])
+        cursor += 3
+
+        # 3. 元のファイル名を取得
+        filename_bytes = file_bytes[cursor:cursor+filename_len]
+        original_filename = filename_bytes.decode('utf-8')
+        cursor += filename_len
+
+        # 4. 解凍
+        compressed_body = file_bytes[cursor:]
+        decompressed_data = lzma.decompress(compressed_body)
+
+        return original_filename, decompressed_data
+
+    except Exception as e:
+        st.error(f"解凍エラー: データが破損している可能性があります。\n詳細: {e}")
+        return None, None
+
+# --- UI構築 (Streamlit) ---
+st.set_page_config(page_title="Ultra Compress App", layout="centered")
+
+st.title("🗜️ Ultra Compression & Custom Container")
 st.markdown("""
-このアプリは、標準的な解凍ソフトでは開けない**独自形式 (.myzip)** にファイルを圧縮・変換します。
-内部で圧縮に加え、特定のキーを使ったビット演算を行っています。
+GitHub Codespacesで動作する独自圧縮アプリです。
+Python標準で最も圧縮率の高い **LZMA (Preset 9/Extreme)** を使用し、
+独自の `.mycmp` コンテナにファイル名を保持して格納します。
 """)
 
-# サイドバー設定
-st.sidebar.header("設定")
-mode = st.sidebar.radio("モード選択", ["圧縮 (Compress)", "解凍 (Decompress)"])
-secret_key = st.sidebar.slider("暗号化キー (0-255)", 0, 255, 123, help="この数字がパスワード代わりになります。解凍時にも同じ数字が必要です。")
+tab1, tab2 = st.tabs(["圧縮 (Compress)", "解凍 (Decompress)"])
 
-st.divider()
-
-if mode == "圧縮 (Compress)":
-    st.subheader("ファイルの圧縮")
-    uploaded_file = st.file_uploader("圧縮したいファイルをアップロード", type=None)
+# --- 圧縮タブ ---
+with tab1:
+    st.header("ファイルをアップロードして圧縮")
+    uploaded_file = st.file_uploader("任意のファイルを選択", key="compress_uploader")
 
     if uploaded_file is not None:
-        file_bytes = uploaded_file.read()
+        file_bytes = uploaded_file.getvalue()
         file_name = uploaded_file.name
-        
-        if st.button("独自形式に変換して圧縮"):
-            with st.spinner("処理中..."):
-                try:
-                    # 独自圧縮処理
-                    processed_data = custom_compress(file_bytes, secret_key)
-                    
-                    st.success(f"圧縮成功！ サイズ: {len(file_bytes)}B -> {len(processed_data)}B")
-                    
-                    # ダウンロードボタン
-                    st.download_button(
-                        label="📦 .myzipファイルをダウンロード",
-                        data=processed_data,
-                        file_name=f"{file_name}.myzip",
-                        mime="application/octet-stream"
-                    )
-                except Exception as e:
-                    st.error(f"エラーが発生しました: {e}")
+        original_size = len(file_bytes)
 
-else:  # 解凍モード
-    st.subheader("ファイルの解凍")
-    uploaded_file = st.file_uploader("独自形式(.myzip)ファイルをアップロード", type=["myzip"])
+        if st.button("圧縮開始", key="compress_btn"):
+            with st.spinner('最高設定で圧縮中... (大きなファイルは時間がかかります)'):
+                compressed_data = compress_data(file_bytes, file_name)
+            
+            if compressed_data:
+                compressed_size = len(compressed_data)
+                ratio = (1 - (compressed_size / original_size)) * 100
+                
+                st.success("圧縮完了！")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("元サイズ", f"{original_size:,} bytes")
+                col2.metric("圧縮後サイズ", f"{compressed_size:,} bytes")
+                col3.metric("削減率", f"{ratio:.2f}%")
 
-    if uploaded_file is not None:
-        file_bytes = uploaded_file.read()
-        # 元のファイル名を推測（拡張子.myzipを取るだけの簡易実装）
-        original_name = uploaded_file.name.replace(".myzip", "")
-        if original_name == uploaded_file.name:
-            original_name = "restored_file"
+                # ダウンロードボタン
+                st.download_button(
+                    label="圧縮ファイルをダウンロード (.mycmp)",
+                    data=compressed_data,
+                    file_name=f"{file_name}.mycmp",
+                    mime="application/octet-stream"
+                )
 
-        if st.button("元のファイルに復元"):
-            with st.spinner("解凍・復号中..."):
-                try:
-                    # 独自解凍処理
-                    restored_data = custom_decompress(file_bytes, secret_key)
-                    
-                    st.success("復元成功！")
-                    
-                    # ダウンロードボタン
-                    st.download_button(
-                        label="📂 復元ファイルをダウンロード",
-                        data=restored_data,
-                        file_name=original_name,
-                        mime="application/octet-stream"
-                    )
-                except ValueError as ve:
-                    st.error(f"エラー: {ve}")
-                except Exception as e:
-                    st.error(f"予期せぬエラー: {e}")
+# --- 解凍タブ ---
+with tab2:
+    st.header("独自形式 (.mycmp) を解凍")
+    uploaded_mycmp = st.file_uploader("圧縮ファイル (.mycmp) を選択", type=["mycmp"], key="decompress_uploader")
+
+    if uploaded_mycmp is not None:
+        if st.button("解凍開始", key="decompress_btn"):
+            with st.spinner('解凍中...'):
+                orig_name, dec_data = decompress_data(uploaded_mycmp.getvalue())
+            
+            if orig_name and dec_data:
+                st.success(f"復元成功: {orig_name}")
+                
+                st.download_button(
+                    label=f"解凍されたファイルをダウンロード ({orig_name})",
+                    data=dec_data,
+                    file_name=orig_name,
+                    mime="application/octet-stream"
+                )
